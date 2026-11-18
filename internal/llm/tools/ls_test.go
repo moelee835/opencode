@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/opencode-ai/opencode/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -25,9 +26,15 @@ func TestLsTool_Info(t *testing.T) {
 
 func TestLsTool_Run(t *testing.T) {
 	// Create a temporary directory for testing
-	tempDir, err := os.MkdirTemp("", "ls_tool_test")
+	tempDir, err := os.MkdirTemp(t.TempDir(), "ls_tool_test")
 	require.NoError(t, err)
 	defer os.RemoveAll(tempDir)
+	// Empty and relative paths resolve against configured WorkingDir, not os.Getwd.
+	cfg, err := config.Load(filepath.Dir(tempDir), false)
+	require.NoError(t, err)
+	originalDir := cfg.WorkingDir
+	cfg.WorkingDir = filepath.Dir(tempDir)
+	t.Cleanup(func() { cfg.WorkingDir = originalDir })
 
 	// Create a test directory structure
 	testDirs := []string{
@@ -120,8 +127,7 @@ func TestLsTool_Run(t *testing.T) {
 	})
 
 	t.Run("handles empty path parameter", func(t *testing.T) {
-		// For this test, we need to mock the config.WorkingDirectory function
-		// Since we can't easily do that, we'll just check that the response doesn't contain an error message
+		// The default path is the configured parent of tempDir.
 		
 		tool := NewLsTool()
 		params := LSParams{
@@ -139,9 +145,8 @@ func TestLsTool_Run(t *testing.T) {
 		response, err := tool.Run(context.Background(), call)
 		require.NoError(t, err)
 		
-		// The response should either contain a valid directory listing or an error
-		// We'll just check that it's not empty
-		assert.NotEmpty(t, response.Content)
+		assert.False(t, response.IsError)
+		assert.Contains(t, response.Content, filepath.Base(tempDir))
 	})
 
 	t.Run("handles invalid parameters", func(t *testing.T) {

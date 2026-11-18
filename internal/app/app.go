@@ -17,12 +17,14 @@ import (
 	"github.com/opencode-ai/opencode/internal/logging"
 	"github.com/opencode-ai/opencode/internal/lsp"
 	"github.com/opencode-ai/opencode/internal/message"
+	"github.com/opencode-ai/opencode/internal/messaging"
 	"github.com/opencode-ai/opencode/internal/permission"
 	"github.com/opencode-ai/opencode/internal/session"
 	"github.com/opencode-ai/opencode/internal/tui/theme"
 )
 
 type App struct {
+	Mail        *messaging.Service
 	Sessions    session.Service
 	Messages    message.Service
 	History     history.Service
@@ -46,6 +48,7 @@ func New(ctx context.Context, conn *sql.DB) (*App, error) {
 	files := history.NewService(q, conn)
 
 	app := &App{
+		Mail:        messaging.New(conn),
 		Sessions:    sessions,
 		Messages:    messages,
 		History:     files,
@@ -65,6 +68,7 @@ func New(ctx context.Context, conn *sql.DB) (*App, error) {
 		app.Sessions,
 		app.Messages,
 		agent.CoderAgentTools(
+			app.Mail,
 			app.Permissions,
 			app.Sessions,
 			app.Messages,

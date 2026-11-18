@@ -15,6 +15,7 @@ import (
 	"github.com/opencode-ai/opencode/internal/format"
 	"github.com/opencode-ai/opencode/internal/llm/agent"
 	"github.com/opencode-ai/opencode/internal/logging"
+	"github.com/opencode-ai/opencode/internal/messaging"
 	"github.com/opencode-ai/opencode/internal/pubsub"
 	"github.com/opencode-ai/opencode/internal/tui"
 	"github.com/opencode-ai/opencode/internal/version"
@@ -257,6 +258,36 @@ func setupSubscriptions(app *app.App, parentCtx context.Context) (chan tea.Msg, 
 	setupSubscriber(ctx, &wg, "messages", app.Messages.Subscribe, ch)
 	setupSubscriber(ctx, &wg, "permissions", app.Permissions.Subscribe, ch)
 	setupSubscriber(ctx, &wg, "coderAgent", app.CoderAgent.Subscribe, ch)
+	// Mail is persisted across processes. Do not route it through the lossy
+	// in-process broker, and retain the cursor when a transient DB error occurs.
+	after, err := app.Mail.Latest(ctx)
+	if err != nil {
+		logging.Error("Unable to read mailbox cursor", "error", err)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for ctx.Err() == nil {
+			err := app.Mail.Watch(ctx, "", after, func(m messaging.Message) error {
+				select {
+				case ch <- m:
+					after = m.Seq
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			})
+			if ctx.Err() != nil {
+				return
+			}
+			logging.Error("Mailbox watch failed; retrying", "error", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Second):
+			}
+		}
+	}()
 
 	cleanupFunc := func() {
 		logging.Info("Cancelling all subscriptions")
@@ -266,16 +297,15 @@ func setupSubscriptions(app *app.App, parentCtx context.Context) (chan tea.Msg, 
 		go func() {
 			defer logging.RecoverPanic("subscription-cleanup", nil)
 			wg.Wait()
+			close(ch) // Only close after every writer exits, even after a timeout.
 			close(waitCh)
 		}()
 
 		select {
 		case <-waitCh:
 			logging.Info("All subscription goroutines completed successfully")
-			close(ch) // Only close after all writers are confirmed done
 		case <-time.After(5 * time.Second):
 			logging.Warn("Timed out waiting for some subscription goroutines to complete")
-			close(ch)
 		}
 	}
 	return ch, cleanupFunc

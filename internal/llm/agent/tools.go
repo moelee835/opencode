@@ -7,11 +7,13 @@ import (
 	"github.com/opencode-ai/opencode/internal/llm/tools"
 	"github.com/opencode-ai/opencode/internal/lsp"
 	"github.com/opencode-ai/opencode/internal/message"
+	"github.com/opencode-ai/opencode/internal/messaging"
 	"github.com/opencode-ai/opencode/internal/permission"
 	"github.com/opencode-ai/opencode/internal/session"
 )
 
 func CoderAgentTools(
+	mail *messaging.Service,
 	permissions permission.Service,
 	sessions session.Service,
 	messages message.Service,
@@ -25,6 +27,7 @@ func CoderAgentTools(
 	}
 	return append(
 		[]tools.BaseTool{
+			tools.NewSessionMessageTool(mail, sessions, permissions),
 			tools.NewBashTool(permissions),
 			tools.NewEditTool(lspClients, permissions, history),
 			tools.NewFetchTool(permissions),

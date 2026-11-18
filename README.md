@@ -526,6 +526,47 @@ OpenCode includes several built-in commands:
 | Initialize Project | Creates or updates the OpenCode.md memory file with project-specific information                    |
 | Compact Session    | Manually triggers the summarization of the current session, creating a new session with the summary |
 
+## Cross-session messaging
+
+Sessions sharing the same local `opencode.db` can exchange durable text messages.
+No server or API key is needed for the messaging CLI. By default it opens
+`.opencode` in the current directory; pass `--data-dir /path/to/.opencode` when
+using a custom `data.directory`. This subcommand does not load model configuration.
+
+```bash
+# Find session IDs (create conversations in OpenCode first)
+opencode messages sessions
+
+# Send from session A to session B; reuse the key when retrying
+opencode messages send --from SESSION_A --to SESSION_B --body "Tests are ready" --key review-1
+
+# Inspect unread mail; inspecting does not acknowledge it
+opencode messages inbox --session SESSION_B --unread
+
+# Stream JSON lines, including historical messages; Ctrl+C stops the stream
+opencode messages watch --session SESSION_B
+
+# Resume after a previously handled message's seq
+opencode messages watch --session SESSION_B --after 42
+
+# Explicitly mark a message as read
+opencode messages read --session SESSION_B --id MESSAGE_ID
+```
+
+`inbox` returns up to 100 messages; use the last `seq` as `--after` for the next
+page. Messages survive process exits, and duplicate sends with the same sender
+and key return the existing message. Reusing a key for different content fails.
+Bodies must be valid UTF-8, nonblank, and no larger than 32 KiB.
+
+The coder agent has a `session_message` tool with `sessions`, `send`, `inbox`,
+and `read` actions. Sending uses the existing permission system; the sender is
+always the current session. Ask the agent to check its inbox to read replies.
+TUI processes show notifications for new project mail, polled every 250 ms.
+Incoming messages do not start an agent or interrupt an active model request.
+Separate databases/worktrees and remote hosts are not connected by this feature.
+
+See [the architecture and delivery design](docs/cross-session-messaging.md).
+
 ## MCP (Model Context Protocol)
 
 OpenCode implements the Model Context Protocol (MCP) to extend its capabilities through external tools. MCP provides a standardized way for the AI assistant to interact with external services and tools.
