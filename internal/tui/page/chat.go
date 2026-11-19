@@ -73,10 +73,10 @@ func (p *chatPage) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case dialog.CommandRunCustomMsg:
 		// Check if the agent is busy before executing custom commands
-		if p.app.CoderAgent.IsBusy() {
+		if p.app.CoderAgent.IsSessionBusy(p.session.ID) {
 			return p, util.ReportWarn("Agent is busy, please wait before executing a command...")
 		}
-		
+
 		// Process the command content with arguments if any
 		content := msg.Content
 		if msg.Args != nil {
@@ -86,7 +86,7 @@ func (p *chatPage) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				content = strings.ReplaceAll(content, placeholder, value)
 			}
 		}
-		
+
 		// Handle custom command execution
 		cmd := p.sendMessage(content, nil)
 		if cmd != nil {
@@ -168,6 +168,15 @@ func (p *chatPage) sendMessage(text string, attachments []message.Attachment) te
 		cmds = append(cmds, util.CmdHandler(chat.SessionSelectedMsg(session)))
 	}
 
+	if member, err := p.app.Teams.Member(context.Background(), p.session.ID); err == nil {
+		if len(attachments) > 0 {
+			return util.ReportWarn("Team instructions currently support text only")
+		}
+		if _, err = p.app.Teams.Tell(context.Background(), member.TeamID, member.SessionID, text); err != nil {
+			return util.ReportError(err)
+		}
+		return util.ReportInfo("Instruction queued for teammate; open Agent Teams to start/resume its runtime if needed")
+	}
 	_, err := p.app.CoderAgent.Run(context.Background(), p.session.ID, text, attachments...)
 	if err != nil {
 		return util.ReportError(err)

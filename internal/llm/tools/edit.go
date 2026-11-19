@@ -202,7 +202,7 @@ func (e *editTool) createNewFile(ctx context.Context, filePath, content string) 
 		permissionPath = rootDir
 	}
 	p := e.permissions.Request(
-		permission.CreatePermissionRequest{
+		permission.CreatePermissionRequest{Context: ctx,
 			SessionID:   sessionID,
 			Path:        permissionPath,
 			ToolName:    EditToolName,
@@ -313,7 +313,7 @@ func (e *editTool) deleteContent(ctx context.Context, filePath, oldString string
 		permissionPath = rootDir
 	}
 	p := e.permissions.Request(
-		permission.CreatePermissionRequest{
+		permission.CreatePermissionRequest{Context: ctx,
 			SessionID:   sessionID,
 			Path:        permissionPath,
 			ToolName:    EditToolName,
@@ -433,7 +433,7 @@ func (e *editTool) replaceContent(ctx context.Context, filePath, oldString, newS
 		permissionPath = rootDir
 	}
 	p := e.permissions.Request(
-		permission.CreatePermissionRequest{
+		permission.CreatePermissionRequest{Context: ctx,
 			SessionID:   sessionID,
 			Path:        permissionPath,
 			ToolName:    EditToolName,

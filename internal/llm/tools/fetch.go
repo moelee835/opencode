@@ -122,7 +122,7 @@ func (t *fetchTool) Run(ctx context.Context, call ToolCall) (ToolResponse, error
 	}
 
 	p := t.permissions.Request(
-		permission.CreatePermissionRequest{
+		permission.CreatePermissionRequest{Context: ctx,
 			SessionID:   sessionID,
 			Path:        config.WorkingDirectory(),
 			ToolName:    FetchToolName,

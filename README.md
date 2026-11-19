@@ -526,6 +526,35 @@ OpenCode includes several built-in commands:
 | Initialize Project | Creates or updates the OpenCode.md memory file with project-specific information                    |
 | Compact Session    | Manually triggers the summarization of the current session, creating a new session with the summary |
 
+## Agent Teams
+
+A lead session can create named teammates, assign shared tasks, and coordinate
+through automatically delivered messages. Teammates have independent conversation
+histories and session shells, with optional model selection. Ready tasks are claimed
+atomically; dependencies and approval gates control when they can run.
+
+In the TUI, ask the agent to create a team, then open **Ctrl+K → Agent Teams** to
+inspect members, open their conversations, and pause/resume work or approve tasks.
+From the CLI:
+
+```bash
+opencode teams create review
+opencode teams spawn review reviewer --prompt "Review the API and report findings"
+opencode teams run review
+# In another terminal:
+opencode teams tell review reviewer --body "Focus on authentication"
+opencode teams status review
+opencode teams stop review
+```
+
+Headless `teams run` denies permission-requiring tools unless explicitly started
+with `--allow-tools`. Use the TUI for individual permission approvals. Incoming
+messages execute after the current turn finishes. Files remain in a shared project
+workspace; give teammates separate file ownership. One-shot `-p` mode does not
+host teams.
+
+See [Agent Teams: usage, architecture, recovery, and verified scope](docs/agent-teams.md).
+
 ## Cross-session messaging
 
 Sessions sharing the same local `opencode.db` can exchange durable text messages.
@@ -562,7 +591,7 @@ The coder agent has a `session_message` tool with `sessions`, `send`, `inbox`,
 and `read` actions. Sending uses the existing permission system; the sender is
 always the current session. Ask the agent to check its inbox to read replies.
 TUI processes show notifications for new project mail, polled every 250 ms.
-Incoming messages do not start an agent or interrupt an active model request.
+For ordinary sessions, incoming messages do not start an agent or interrupt an active model request. Registered Agent Teams members automatically process new mail after their current turn finishes.
 Separate databases/worktrees and remote hosts are not connected by this feature.
 
 See [the architecture and delivery design](docs/cross-session-messaging.md).

@@ -167,7 +167,7 @@ func (w *writeTool) Run(ctx context.Context, call ToolCall) (ToolResponse, error
 		permissionPath = rootDir
 	}
 	p := w.permissions.Request(
-		permission.CreatePermissionRequest{
+		permission.CreatePermissionRequest{Context: ctx,
 			SessionID:   sessionID,
 			Path:        permissionPath,
 			ToolName:    WriteToolName,

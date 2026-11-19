@@ -90,7 +90,7 @@ func (b *mcpTool) Run(ctx context.Context, params tools.ToolCall) (tools.ToolRes
 	}
 	permissionDescription := fmt.Sprintf("execute %s with the following parameters: %s", b.Info().Name, params.Input)
 	p := b.permissions.Request(
-		permission.CreatePermissionRequest{
+		permission.CreatePermissionRequest{Context: ctx,
 			SessionID:   sessionID,
 			Path:        config.WorkingDirectory(),
 			ToolName:    b.Info().Name,

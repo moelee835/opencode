@@ -50,11 +50,14 @@ type Service interface {
 	Model() models.Model
 	Run(ctx context.Context, sessionID string, content string, attachments ...message.Attachment) (<-chan AgentEvent, error)
 	Cancel(sessionID string)
+	CancelAll()
 	IsSessionBusy(sessionID string) bool
 	IsBusy() bool
 	Update(agentName config.AgentName, modelID models.ModelID) (models.Model, error)
 	Summarize(ctx context.Context, sessionID string) error
 }
+
+var sessionRequests sync.Map
 
 type agent struct {
 	*pubsub.Broker[AgentEvent]
@@ -67,7 +70,7 @@ type agent struct {
 	titleProvider     provider.Provider
 	summarizeProvider provider.Provider
 
-	activeRequests sync.Map
+	activeRequests *sync.Map
 }
 
 func NewAgent(
@@ -104,7 +107,7 @@ func NewAgent(
 		tools:             agentTools,
 		titleProvider:     titleProvider,
 		summarizeProvider: summarizeProvider,
-		activeRequests:    sync.Map{},
+		activeRequests:    &sessionRequests,
 	}
 
 	return agent, nil
@@ -116,7 +119,7 @@ func (a *agent) Model() models.Model {
 
 func (a *agent) Cancel(sessionID string) {
 	// Cancel regular requests
-	if cancelFunc, exists := a.activeRequests.LoadAndDelete(sessionID); exists {
+	if cancelFunc, exists := a.activeRequests.Load(sessionID); exists {
 		if cancel, ok := cancelFunc.(context.CancelFunc); ok {
 			logging.InfoPersist(fmt.Sprintf("Request cancellation initiated for session: %s", sessionID))
 			cancel()
@@ -124,7 +127,7 @@ func (a *agent) Cancel(sessionID string) {
 	}
 
 	// Also check for summarize requests
-	if cancelFunc, exists := a.activeRequests.LoadAndDelete(sessionID + "-summarize"); exists {
+	if cancelFunc, exists := a.activeRequests.Load(sessionID + "-summarize"); exists {
 		if cancel, ok := cancelFunc.(context.CancelFunc); ok {
 			logging.InfoPersist(fmt.Sprintf("Summarize cancellation initiated for session: %s", sessionID))
 			cancel()
@@ -199,15 +202,21 @@ func (a *agent) Run(ctx context.Context, sessionID string, content string, attac
 	if !a.provider.Model().SupportsAttachments && attachments != nil {
 		attachments = nil
 	}
-	events := make(chan AgentEvent)
+	events := make(chan AgentEvent, 1)
 	if a.IsSessionBusy(sessionID) {
 		return nil, ErrSessionBusy
 	}
 
 	genCtx, cancel := context.WithCancel(ctx)
 
-	a.activeRequests.Store(sessionID, cancel)
+	if _, loaded := a.activeRequests.LoadOrStore(sessionID, cancel); loaded {
+		cancel()
+		return nil, ErrSessionBusy
+	}
 	go func() {
+		defer a.activeRequests.Delete(sessionID)
+		defer cancel()
+		defer close(events)
 		logging.Debug("Request started", "sessionID", sessionID)
 		defer logging.RecoverPanic("agent.Run", func() {
 			events <- a.err(fmt.Errorf("panic while running the agent"))
@@ -221,11 +230,8 @@ func (a *agent) Run(ctx context.Context, sessionID string, content string, attac
 			logging.ErrorPersist(result.Error.Error())
 		}
 		logging.Debug("Request completed", "sessionID", sessionID)
-		a.activeRequests.Delete(sessionID)
-		cancel()
 		a.Publish(pubsub.CreatedEvent, result)
 		events <- result
-		close(events)
 	}()
 	return events, nil
 }
@@ -546,10 +552,13 @@ func (a *agent) Summarize(ctx context.Context, sessionID string) error {
 	summarizeCtx, cancel := context.WithCancel(ctx)
 
 	// Store the cancel function in activeRequests to allow cancellation
-	a.activeRequests.Store(sessionID+"-summarize", cancel)
+	if _, loaded := a.activeRequests.LoadOrStore(sessionID, cancel); loaded {
+		cancel()
+		return ErrSessionBusy
+	}
 
 	go func() {
-		defer a.activeRequests.Delete(sessionID + "-summarize")
+		defer a.activeRequests.Delete(sessionID)
 		defer cancel()
 		event := AgentEvent{
 			Type:     AgentEventTypeSummarize,
@@ -704,10 +713,17 @@ func (a *agent) Summarize(ctx context.Context, sessionID string) error {
 }
 
 func createAgentProvider(agentName config.AgentName) (provider.Provider, error) {
+	return createAgentProviderWithModel(agentName, "")
+}
+
+func createAgentProviderWithModel(agentName config.AgentName, modelID models.ModelID) (provider.Provider, error) {
 	cfg := config.Get()
 	agentConfig, ok := cfg.Agents[agentName]
 	if !ok {
 		return nil, fmt.Errorf("agent %s not found", agentName)
+	}
+	if modelID != "" {
+		agentConfig.Model = modelID
 	}
 	model, ok := models.SupportedModels[agentConfig.Model]
 	if !ok {
@@ -755,4 +771,23 @@ func createAgentProvider(agentName config.AgentName) (provider.Provider, error) 
 	}
 
 	return agentProvider, nil
+}
+
+// NewAgentWithModel creates a teammate provider without mutating global config.
+func NewAgentWithModel(modelID models.ModelID, sessions session.Service, messages message.Service, agentTools []tools.BaseTool) (Service, error) {
+	p, err := createAgentProviderWithModel(config.AgentCoder, modelID)
+	if err != nil {
+		return nil, err
+	}
+	return &agent{Broker: pubsub.NewBroker[AgentEvent](), sessions: sessions, messages: messages, tools: agentTools, provider: p, activeRequests: &sessionRequests}, nil
+}
+
+// CancelAll cancels user turns as well as team turns before app shutdown.
+func (a *agent) CancelAll() {
+	a.activeRequests.Range(func(_, value any) bool {
+		if cancel, ok := value.(context.CancelFunc); ok {
+			cancel()
+		}
+		return true
+	})
 }

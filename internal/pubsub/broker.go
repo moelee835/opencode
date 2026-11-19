@@ -30,15 +30,14 @@ func NewBrokerWithOptions[T any](channelBufferSize, maxEvents int) *Broker[T] {
 }
 
 func (b *Broker[T]) Shutdown() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	select {
 	case <-b.done: // Already closed
 		return
 	default:
 		close(b.done)
 	}
-
-	b.mu.Lock()
-	defer b.mu.Unlock()
 
 	for ch := range b.subs {
 		delete(b.subs, ch)
@@ -92,9 +91,9 @@ func (b *Broker[T]) GetSubscriberCount() int {
 
 func (b *Broker[T]) Publish(t EventType, payload T) {
 	b.mu.RLock()
+	defer b.mu.RUnlock()
 	select {
 	case <-b.done:
-		b.mu.RUnlock()
 		return
 	default:
 	}
@@ -103,7 +102,6 @@ func (b *Broker[T]) Publish(t EventType, payload T) {
 	for sub := range b.subs {
 		subscribers = append(subscribers, sub)
 	}
-	b.mu.RUnlock()
 
 	event := Event[T]{Type: t, Payload: payload}
 

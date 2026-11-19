@@ -61,7 +61,7 @@ func (t *sessionMessageTool) Run(ctx context.Context, call ToolCall) (ToolRespon
 		if _, err := t.sessions.Get(ctx, p.To); err != nil {
 			return NewTextErrorResponse("recipient session does not exist"), nil
 		}
-		if !t.permissions.Request(permission.CreatePermissionRequest{SessionID: self, ToolName: "session_message", Action: "send:" + p.To, Description: fmt.Sprintf("Send message to session %s", p.To), Params: map[string]string{"to": p.To, "body": p.Body}}) {
+		if !t.permissions.Request(permission.CreatePermissionRequest{Context: ctx, SessionID: self, ToolName: "session_message", Action: "send:" + p.To, Description: fmt.Sprintf("Send message to session %s", p.To), Params: map[string]string{"to": p.To, "body": p.Body}}) {
 			return NewTextErrorResponse("permission denied"), nil
 		}
 		value, err = t.mail.Send(ctx, self, p.To, p.Body, call.ID)

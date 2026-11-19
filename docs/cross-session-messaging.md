@@ -1,5 +1,7 @@
 # Cross-session messaging 설계 및 구현
 
+후속 구현: [Agent Teams](agent-teams.md)는 등록된 팀원에 자동 실행·작업 조율을 추가한다. 아래의 자동 실행 미지원 설명은 일반 세션의 기본 메시징 계층에 해당한다.
+
 기준 소스: `73ee493`의 Go OpenCode. 이 문서는 현재 체크아웃을 분석한 결과이며 다른 OpenCode 구현이나 후속 프로젝트의 API를 전제하지 않는다.
 
 ## 현재 구조와 설계 근거

@@ -268,7 +268,7 @@ func (b *bashTool) Run(ctx context.Context, call ToolCall) (ToolResponse, error)
 	}
 	if !isSafeReadOnly {
 		p := b.permissions.Request(
-			permission.CreatePermissionRequest{
+			permission.CreatePermissionRequest{Context: ctx,
 				SessionID:   sessionID,
 				Path:        config.WorkingDirectory(),
 				ToolName:    BashToolName,
@@ -284,7 +284,10 @@ func (b *bashTool) Run(ctx context.Context, call ToolCall) (ToolResponse, error)
 		}
 	}
 	startTime := time.Now()
-	shell := shell.GetPersistentShell(config.WorkingDirectory())
+	shell := shell.GetSessionShell(sessionID, config.WorkingDirectory())
+	if shell == nil {
+		return ToolResponse{}, fmt.Errorf("failed to start session shell")
+	}
 	stdout, stderr, exitCode, interrupted, err := shell.Exec(ctx, params.Command, params.Timeout)
 	if err != nil {
 		return ToolResponse{}, fmt.Errorf("error executing command: %w", err)

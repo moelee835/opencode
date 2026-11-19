@@ -14,16 +14,22 @@ import (
 	"github.com/opencode-ai/opencode/internal/format"
 	"github.com/opencode-ai/opencode/internal/history"
 	"github.com/opencode-ai/opencode/internal/llm/agent"
+	"github.com/opencode-ai/opencode/internal/llm/models"
+	"github.com/opencode-ai/opencode/internal/llm/tools"
+	"github.com/opencode-ai/opencode/internal/llm/tools/shell"
 	"github.com/opencode-ai/opencode/internal/logging"
 	"github.com/opencode-ai/opencode/internal/lsp"
 	"github.com/opencode-ai/opencode/internal/message"
 	"github.com/opencode-ai/opencode/internal/messaging"
 	"github.com/opencode-ai/opencode/internal/permission"
 	"github.com/opencode-ai/opencode/internal/session"
+	"github.com/opencode-ai/opencode/internal/teams"
 	"github.com/opencode-ai/opencode/internal/tui/theme"
 )
 
 type App struct {
+	Teams       *teams.Store
+	TeamRuntime *teams.Runtime
 	Mail        *messaging.Service
 	Sessions    session.Service
 	Messages    message.Service
@@ -56,6 +62,9 @@ func New(ctx context.Context, conn *sql.DB) (*App, error) {
 		LSPClients:  make(map[string]*lsp.Client),
 	}
 
+	app.Teams = teams.NewStore(conn)
+	app.TeamRuntime = teams.NewRuntime(ctx, app.Teams, &teamRunner{app: app, agents: map[string]agent.Service{}})
+
 	// Initialize theme based on configuration
 	app.initTheme()
 
@@ -67,14 +76,14 @@ func New(ctx context.Context, conn *sql.DB) (*App, error) {
 		config.AgentCoder,
 		app.Sessions,
 		app.Messages,
-		agent.CoderAgentTools(
+		append(agent.CoderAgentTools(
 			app.Mail,
 			app.Permissions,
 			app.Sessions,
 			app.Messages,
 			app.History,
-			app.LSPClients,
-		),
+			app.toolClients(),
+		), tools.NewTeamTool(app.Teams, app.TeamRuntime, app.Mail, app.Permissions)),
 	)
 	if err != nil {
 		logging.Error("Failed to create coder agent", err)
@@ -103,6 +112,7 @@ func (app *App) initTheme() {
 // RunNonInteractive handles the execution flow when a prompt is provided via CLI flag.
 func (a *App) RunNonInteractive(ctx context.Context, prompt string, outputFormat string, quiet bool) error {
 	logging.Info("Running in non-interactive mode")
+	ctx = context.WithValue(ctx, tools.TeamsDisabledContextKey, true)
 
 	// Start spinner if not in quiet mode
 	var spinner *format.Spinner
@@ -166,6 +176,11 @@ func (a *App) RunNonInteractive(ctx context.Context, prompt string, outputFormat
 
 // Shutdown performs a clean shutdown of the application
 func (app *App) Shutdown() {
+	if app.CoderAgent != nil {
+		app.CoderAgent.CancelAll()
+	}
+	app.TeamRuntime.Close()
+	shell.CloseAll()
 	// Cancel all watcher goroutines
 	app.cancelFuncsMutex.Lock()
 	for _, cancel := range app.watcherCancelFuncs {
@@ -187,4 +202,63 @@ func (app *App) Shutdown() {
 		}
 		cancel()
 	}
+}
+
+// Teammates inherit the coder model or select an explicit model. Conversation
+// histories are independent; all executors share per-session run locks.
+type teamRunner struct {
+	app    *App
+	mu     sync.Mutex
+	agents map[string]agent.Service
+}
+
+func (r *teamRunner) Busy(id string) bool { return r.app.CoderAgent.IsSessionBusy(id) }
+func (r *teamRunner) Run(ctx context.Context, m teams.Member, input string) (string, error) {
+	executor := r.app.CoderAgent
+	if m.Model != "" {
+		r.mu.Lock()
+		var err error
+		executor = r.agents[m.Model]
+		if executor == nil {
+			executor, err = agent.NewAgentWithModel(models.ModelID(m.Model), r.app.Sessions, r.app.Messages, append(agent.CoderAgentTools(r.app.Mail, r.app.Permissions, r.app.Sessions, r.app.Messages, r.app.History, r.app.toolClients()), tools.NewTeamTool(r.app.Teams, r.app.TeamRuntime, r.app.Mail, r.app.Permissions)))
+			if err == nil {
+				r.agents[m.Model] = executor
+			}
+		}
+		r.mu.Unlock()
+		if err != nil {
+			return "", err
+		}
+	}
+	for {
+		done, err := executor.Run(ctx, m.SessionID, input)
+		if errors.Is(err, agent.ErrSessionBusy) {
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(100 * time.Millisecond):
+				continue
+			}
+		}
+		if err != nil {
+			return "", err
+		}
+		// Drain completion even after cancellation; releasing a team lease must not
+		// permit a replacement runtime while the old executor is still running.
+		result := <-done
+		if result.Error != nil {
+			return "", result.Error
+		}
+		switch result.Message.FinishReason() {
+		case message.FinishReasonCanceled, message.FinishReasonError, message.FinishReasonPermissionDenied, message.FinishReasonMaxTokens:
+			return "", fmt.Errorf("agent stopped: %s", result.Message.FinishReason())
+		}
+		return result.Message.Content().String(), nil
+	}
+}
+
+func (app *App) toolClients() map[string]*lsp.Client {
+	app.clientsMutex.RLock()
+	defer app.clientsMutex.RUnlock()
+	return maps.Clone(app.LSPClients)
 }

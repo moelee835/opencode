@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -18,7 +19,9 @@ import (
 type PersistentShell struct {
 	cmd          *exec.Cmd
 	stdin        *os.File
-	isAlive      bool
+	isAlive      atomic.Bool
+	done         chan struct{}
+	stopOnce     sync.Once
 	cwd          string
 	mu           sync.Mutex
 	commandQueue chan *commandExecution
@@ -39,45 +42,56 @@ type commandResult struct {
 	err         error
 }
 
-var (
-	shellInstance     *PersistentShell
-	shellInstanceOnce sync.Once
-)
+var shellMu sync.Mutex
+var shells = map[string]*PersistentShell{}
 
-func GetPersistentShell(workingDir string) *PersistentShell {
-	shellInstanceOnce.Do(func() {
-		shellInstance = newPersistentShell(workingDir)
-	})
+func GetPersistentShell(workingDir string) *PersistentShell { return GetSessionShell("", workingDir) }
 
-	if shellInstance == nil {
-		shellInstance = newPersistentShell(workingDir)
-	} else if !shellInstance.isAlive {
-		shellInstance = newPersistentShell(shellInstance.cwd)
+// Session shells retain their own cwd and environment without leaking to peers.
+func GetSessionShell(sessionID, workingDir string) *PersistentShell {
+	shellMu.Lock()
+	defer shellMu.Unlock()
+	key := workingDir + "\x00" + sessionID
+	shell := shells[key]
+	if shell == nil || !shell.isAlive.Load() {
+		shell = newPersistentShell(workingDir)
+		shells[key] = shell
 	}
-
-	return shellInstance
+	return shell
 }
+func CloseAll() {
+	shellMu.Lock()
+	old := shells
+	shells = map[string]*PersistentShell{}
+	shellMu.Unlock()
+	for _, shell := range old {
+		if shell != nil {
+			shell.Close()
+		}
+	}
+}
+func (s *PersistentShell) stopped() { s.isAlive.Store(false); s.stopOnce.Do(func() { close(s.done) }) }
 
 func newPersistentShell(cwd string) *PersistentShell {
 	// Get shell configuration from config
 	cfg := config.Get()
-	
+
 	// Default to environment variable if config is not set or nil
 	var shellPath string
 	var shellArgs []string
-	
+
 	if cfg != nil {
 		shellPath = cfg.Shell.Path
 		shellArgs = cfg.Shell.Args
 	}
-	
+
 	if shellPath == "" {
 		shellPath = os.Getenv("SHELL")
 		if shellPath == "" {
 			shellPath = "/bin/bash"
 		}
 	}
-	
+
 	// Default shell args
 	if len(shellArgs) == 0 {
 		shellArgs = []string{"-l"}
@@ -101,17 +115,17 @@ func newPersistentShell(cwd string) *PersistentShell {
 	shell := &PersistentShell{
 		cmd:          cmd,
 		stdin:        stdinPipe.(*os.File),
-		isAlive:      true,
+		done:         make(chan struct{}),
 		cwd:          cwd,
 		commandQueue: make(chan *commandExecution, 10),
 	}
 
+	shell.isAlive.Store(true)
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				fmt.Fprintf(os.Stderr, "Panic in shell command processor: %v\n", r)
-				shell.isAlive = false
-				close(shell.commandQueue)
+				shell.stopped()
 			}
 		}()
 		shell.processCommands()
@@ -122,17 +136,21 @@ func newPersistentShell(cwd string) *PersistentShell {
 		if err != nil {
 			// Log the error if needed
 		}
-		shell.isAlive = false
-		close(shell.commandQueue)
+		shell.stopped()
 	}()
 
 	return shell
 }
 
 func (s *PersistentShell) processCommands() {
-	for cmd := range s.commandQueue {
-		result := s.execCommand(cmd.command, cmd.timeout, cmd.ctx)
-		cmd.resultChan <- result
+	for {
+		select {
+		case <-s.done:
+			return
+		case cmd := <-s.commandQueue:
+			result := s.execCommand(cmd.command, cmd.timeout, cmd.ctx)
+			cmd.resultChan <- result
+		}
 	}
 }
 
@@ -140,7 +158,7 @@ func (s *PersistentShell) execCommand(command string, timeout time.Duration, ctx
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if !s.isAlive {
+	if !s.isAlive.Load() {
 		return commandResult{
 			stderr:   "Shell is not alive",
 			exitCode: 1,
@@ -269,21 +287,34 @@ func (s *PersistentShell) killChildren() {
 }
 
 func (s *PersistentShell) Exec(ctx context.Context, command string, timeoutMs int) (string, string, int, bool, error) {
-	if !s.isAlive {
+	if !s.isAlive.Load() {
 		return "", "Shell is not alive", 1, false, errors.New("shell is not alive")
 	}
 
 	timeout := time.Duration(timeoutMs) * time.Millisecond
 
-	resultChan := make(chan commandResult)
-	s.commandQueue <- &commandExecution{
+	resultChan := make(chan commandResult, 1)
+	select {
+	case <-ctx.Done():
+		return "", "", 1, true, ctx.Err()
+	case <-s.done:
+		return "", "", 1, false, errors.New("shell closed")
+	case s.commandQueue <- &commandExecution{
 		command:    command,
 		timeout:    timeout,
 		resultChan: resultChan,
 		ctx:        ctx,
+	}:
 	}
 
-	result := <-resultChan
+	var result commandResult
+	select {
+	case result = <-resultChan:
+	case <-ctx.Done():
+		return "", "", 1, true, ctx.Err()
+	case <-s.done:
+		return "", "", 1, false, errors.New("shell closed")
+	}
 	return result.stdout, result.stderr, result.exitCode, result.interrupted, result.err
 }
 
@@ -291,14 +322,14 @@ func (s *PersistentShell) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if !s.isAlive {
+	if !s.isAlive.Load() {
 		return
 	}
 
 	s.stdin.Write([]byte("exit\n"))
 
 	s.cmd.Process.Kill()
-	s.isAlive = false
+	s.stopped()
 }
 
 func shellQuote(s string) string {

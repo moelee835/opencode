@@ -354,7 +354,7 @@ func (p *permissionDialogCmp) renderDefaultContent() string {
 	t := theme.CurrentTheme()
 	baseStyle := styles.BaseStyle()
 
-	content := p.permission.Description
+	content := fmt.Sprintf("Session: %s\n\n%s", p.permission.SessionID, p.permission.Description)
 
 	// Use the cache for markdown rendering
 	renderedContent := p.GetOrSetMarkdown(p.permission.ID, func() (string, error) {

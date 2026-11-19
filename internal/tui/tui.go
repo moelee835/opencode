@@ -106,6 +106,7 @@ type appModel struct {
 	app             *app.App
 	selectedSession session.Session
 
+	permissionQueue []permission.PermissionRequest
 	showPermissions bool
 	permissions     dialog.PermissionDialogCmp
 
@@ -184,6 +185,13 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	var cmd tea.Cmd
 	switch msg := msg.(type) {
+	case page.TeamMemberSelectedMsg:
+		sess, err := a.app.Sessions.Get(context.Background(), msg.SessionID)
+		if err != nil {
+			return a, util.ReportError(err)
+		}
+		cmd := a.moveToPage(page.ChatPage)
+		return a, tea.Batch(cmd, util.CmdHandler(chat.SessionSelectedMsg(sess)))
 	case messaging.Message:
 		return a, util.ReportInfo(fmt.Sprintf("Session message for %s from %s — use session_message inbox or opencode messages inbox", msg.RecipientID, msg.SenderID))
 	case tea.WindowSizeMsg:
@@ -276,6 +284,10 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Permission
 	case pubsub.Event[permission.PermissionRequest]:
+		if a.showPermissions {
+			a.permissionQueue = append(a.permissionQueue, msg.Payload)
+			return a, nil
+		}
 		a.showPermissions = true
 		return a, a.permissions.SetPermissions(msg.Payload)
 	case dialog.PermissionResponseMsg:
@@ -289,6 +301,12 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.app.Permissions.Deny(msg.Permission)
 		}
 		a.showPermissions = false
+		if len(a.permissionQueue) > 0 {
+			next := a.permissionQueue[0]
+			a.permissionQueue = a.permissionQueue[1:]
+			a.showPermissions = true
+			cmd = a.permissions.SetPermissions(next)
+		}
 		return a, cmd
 
 	case page.PageChangeMsg:
@@ -307,6 +325,9 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case startCompactSessionMsg:
+		if member, err := a.app.Teams.Member(context.Background(), a.selectedSession.ID); err == nil && member.Status != "paused" && member.Status != "stopped" {
+			return a, util.ReportWarn("Pause this teammate before compacting its conversation")
+		}
 		// Start compacting the current session
 		a.isCompacting = true
 		a.compactingMessage = "Starting summarization..."
@@ -325,6 +346,9 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case pubsub.Event[agent.AgentEvent]:
 		payload := msg.Payload
+		if payload.Message.SessionID != "" && payload.Message.SessionID != a.selectedSession.ID {
+			return a, nil
+		}
 		if payload.Error != nil {
 			a.isCompacting = false
 			return a, util.ReportError(payload.Error)
@@ -681,13 +705,9 @@ func (a *appModel) findCommand(id string) (dialog.Command, bool) {
 }
 
 func (a *appModel) moveToPage(pageID page.PageID) tea.Cmd {
-	if a.app.CoderAgent.IsBusy() {
-		// For now we don't move to any page if the agent is busy
-		return util.ReportWarn("Agent is busy, please wait...")
-	}
 
 	var cmds []tea.Cmd
-	if _, ok := a.loadedPages[pageID]; !ok {
+	if _, ok := a.loadedPages[pageID]; !ok || pageID == page.TeamsPage {
 		cmd := a.pages[pageID].Init()
 		cmds = append(cmds, cmd)
 		a.loadedPages[pageID] = true
@@ -918,11 +938,14 @@ func New(app *app.App) tea.Model {
 		app:           app,
 		commands:      []dialog.Command{},
 		pages: map[page.PageID]tea.Model{
-			page.ChatPage: page.NewChatPage(app),
-			page.LogsPage: page.NewLogsPage(),
+			page.ChatPage:  page.NewChatPage(app),
+			page.LogsPage:  page.NewLogsPage(),
+			page.TeamsPage: page.NewTeamsPage(app),
 		},
 		filepicker: dialog.NewFilepickerCmp(app),
 	}
+
+	model.RegisterCommand(dialog.Command{ID: "teams", Title: "Agent Teams", Description: "Inspect teammates, tasks and execution controls", Handler: func(dialog.Command) tea.Cmd { return util.CmdHandler(page.PageChangeMsg{ID: page.TeamsPage}) }})
 
 	model.RegisterCommand(dialog.Command{
 		ID:          "init",

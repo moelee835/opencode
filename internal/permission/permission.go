@@ -1,6 +1,7 @@
 package permission
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"slices"
@@ -14,12 +15,13 @@ import (
 var ErrorPermissionDenied = errors.New("permission denied")
 
 type CreatePermissionRequest struct {
-	SessionID   string `json:"session_id"`
-	ToolName    string `json:"tool_name"`
-	Description string `json:"description"`
-	Action      string `json:"action"`
-	Params      any    `json:"params"`
-	Path        string `json:"path"`
+	Context     context.Context `json:"-"`
+	SessionID   string          `json:"session_id"`
+	ToolName    string          `json:"tool_name"`
+	Description string          `json:"description"`
+	Action      string          `json:"action"`
+	Params      any             `json:"params"`
+	Path        string          `json:"path"`
 }
 
 type PermissionRequest struct {
@@ -44,6 +46,7 @@ type Service interface {
 type permissionService struct {
 	*pubsub.Broker[PermissionRequest]
 
+	mu                  sync.Mutex
 	sessionPermissions  []PermissionRequest
 	pendingRequests     sync.Map
 	autoApproveSessions []string
@@ -52,27 +55,42 @@ type permissionService struct {
 func (s *permissionService) GrantPersistant(permission PermissionRequest) {
 	respCh, ok := s.pendingRequests.Load(permission.ID)
 	if ok {
-		respCh.(chan bool) <- true
+		select {
+		case respCh.(chan bool) <- true:
+		default:
+		}
 	}
+	s.mu.Lock()
 	s.sessionPermissions = append(s.sessionPermissions, permission)
+	s.mu.Unlock()
 }
 
 func (s *permissionService) Grant(permission PermissionRequest) {
 	respCh, ok := s.pendingRequests.Load(permission.ID)
 	if ok {
-		respCh.(chan bool) <- true
+		select {
+		case respCh.(chan bool) <- true:
+		default:
+		}
 	}
 }
 
 func (s *permissionService) Deny(permission PermissionRequest) {
 	respCh, ok := s.pendingRequests.Load(permission.ID)
 	if ok {
-		respCh.(chan bool) <- false
+		select {
+		case respCh.(chan bool) <- false:
+		default:
+		}
 	}
 }
 
 func (s *permissionService) Request(opts CreatePermissionRequest) bool {
-	if slices.Contains(s.autoApproveSessions, opts.SessionID) {
+	s.mu.Lock()
+	approved := slices.Contains(s.autoApproveSessions, opts.SessionID)
+	permissions := append([]PermissionRequest(nil), s.sessionPermissions...)
+	s.mu.Unlock()
+	if approved {
 		return true
 	}
 	dir := filepath.Dir(opts.Path)
@@ -89,7 +107,7 @@ func (s *permissionService) Request(opts CreatePermissionRequest) bool {
 		Params:      opts.Params,
 	}
 
-	for _, p := range s.sessionPermissions {
+	for _, p := range permissions {
 		if p.ToolName == permission.ToolName && p.Action == permission.Action && p.SessionID == permission.SessionID && p.Path == permission.Path {
 			return true
 		}
@@ -103,11 +121,21 @@ func (s *permissionService) Request(opts CreatePermissionRequest) bool {
 	s.Publish(pubsub.CreatedEvent, permission)
 
 	// Wait for the response with a timeout
-	resp := <-respCh
-	return resp
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case resp := <-respCh:
+		return resp
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (s *permissionService) AutoApproveSession(sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.autoApproveSessions = append(s.autoApproveSessions, sessionID)
 }
 
