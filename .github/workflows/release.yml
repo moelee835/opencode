@@ -5,6 +5,7 @@ on:
   push:
     tags:
       - "*"
+      - "!xmsg-v*"
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 

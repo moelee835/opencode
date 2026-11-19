@@ -41,6 +41,19 @@ OpenCode is a Go-based CLI application that brings AI assistance to your termina
 
 ## Installation
 
+### Cross-session Messaging Build
+
+Install this fork's prebuilt CLI on macOS or Linux (Apple Silicon/ARM64 or x86-64):
+
+```bash
+curl -fsSL https://github.com/moelee835/opencode/releases/download/xmsg-v0.1.0/install-xmsg.sh | bash
+```
+
+The installer verifies the download and installs `opencode-xmsg` in
+`~/.local/bin`. From your project directory, run `~/.local/bin/opencode-xmsg`
+or use `opencode-xmsg` if that directory is already on your `PATH`. Substitute
+`opencode-xmsg` for `opencode` in the messaging and team examples below.
+
 ### Using the Install Script
 
 ```bash
